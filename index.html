@@ -451,6 +451,28 @@ body{font-family:var(--font-ui);background:#0d0d0d;color:#e8e8e8;min-height:100v
 </head>
 <body>
 <div class="save-indicator" id="saveIndicator"><i class="ti ti-check"></i> Saved</div>
+<div id="loadingOverlay" style="position:fixed;inset:0;background:#0d0d0d;z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem">
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#cc1f1f;letter-spacing:.2em;text-transform:uppercase">Cardinal Valley Industrial Supply</div>
+  <div style="font-family:'IBM Plex Sans',sans-serif;font-size:22px;font-weight:600;color:#f0f0f0">Shows & Events Tracker</div>
+  <div style="display:flex;align-items:center;gap:8px;color:#888;font-size:13px;margin-top:.5rem">
+    <i class="ti ti-cloud-download" style="font-size:18px;color:#cc1f1f"></i>
+    <span id="loadingMsg">Connecting to cloud…</span>
+  </div>
+  <div style="width:200px;height:3px;background:#1a1a1a;border-radius:2px;margin-top:.5rem;overflow:hidden">
+    <div id="loadingBar" style="height:100%;background:#cc1f1f;border-radius:2px;animation:loadPulse 1.5s ease-in-out infinite"></div>
+  </div>
+  <div id="migrateBtn" style="display:none;margin-top:1rem;text-align:center">
+    <div style="color:#888;font-size:12px;margin-bottom:8px">Found local data from previous version</div>
+    <button onclick="migrateLocalToCloud()" style="background:#cc1f1f;color:white;border:none;padding:10px 20px;border-radius:5px;font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font-ui)">
+      <i class="ti ti-cloud-upload"></i> Upload my data to cloud
+    </button>
+    <button onclick="dismissMigrate()" style="background:#1a1a1a;color:#888;border:1px solid #333;padding:10px 20px;border-radius:5px;font-size:13px;cursor:pointer;font-family:var(--font-ui);margin-left:8px">
+      Start fresh
+    </button>
+  </div>
+</div>
+<style>@keyframes loadPulse{0%,100%{width:20%}50%{width:85%}}</style>
+
 <div class="app-shell">
   <div class="top-bar">
     <button class="mobile-menu-btn" onclick="toggleSidebar()" style="display:none;background:none;border:none;color:#cc1f1f;font-size:22px;cursor:pointer;padding:4px;flex-shrink:0" id="hamburgerBtn"><i class="ti ti-menu-2"></i></button>
@@ -581,9 +603,94 @@ function showSaveIndicator(){
   clearTimeout(window._saveTimer);
   window._saveTimer=setTimeout(()=>el.style.display='none',1800);
 }
-function saveData(){
-  try{localStorage.setItem('cv_ts_v6',JSON.stringify(shows));showSaveIndicator();}
-  catch(e){alert('Storage full — try exporting and clearing old data.');}
+/* ── Supabase config ── */
+const SB_URL='https://drjzdkxaxlkbtraoxxos.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRyanpka3hheGxrYnRyYW94eG9zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyMDgzOTUsImV4cCI6MjA5NDc4NDM5NX0.4MCcBJLtdmGblMfL2BRS4d2jsNGcOXRMI9XqDqOygAI';
+const SB_HEADERS={'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Content-Type':'application/json','Prefer':'resolution=merge-duplicates'};
+const SB_ROW_ID='cv_shows_v1'; // single row stores entire shows array
+
+function setSyncStatus(state,msg){
+  let el=document.getElementById('syncStatus');
+  if(!el){
+    el=document.createElement('div');el.id='syncStatus';
+    el.style.cssText='position:fixed;bottom:70px;right:16px;padding:6px 12px;border-radius:5px;font-size:11px;font-weight:600;z-index:300;display:flex;align-items:center;gap:6px;transition:opacity .5s;font-family:var(--font-mono)';
+    document.body.appendChild(el);
+  }
+  const styles={
+    saving:{bg:'#2b1800',color:'#fb923c',icon:'ti-cloud-upload',text:msg||'Saving…'},
+    saved: {bg:'#0d2b1a',color:'#4ade80',icon:'ti-cloud-check',text:msg||'Synced'},
+    error: {bg:'#2a0a0a',color:'#f87171',icon:'ti-cloud-off',text:msg||'Sync error — saved locally'},
+    loading:{bg:'#1a1a2e',color:'#60a5fa',icon:'ti-cloud-download',text:msg||'Loading…'},
+  };
+  const s=styles[state]||styles.saved;
+  el.style.background=s.bg;el.style.color=s.color;
+  el.innerHTML=`<i class="ti ${s.icon}"></i> ${s.text}`;
+  el.style.opacity='1';
+  if(state==='saved'){setTimeout(()=>{el.style.opacity='0';},2500);}
+}
+
+async function saveData(){
+  // Always save to localStorage first as fallback
+  try{localStorage.setItem('cv_ts_v6',JSON.stringify(shows));}catch(e){}
+  showSaveIndicator();
+  setSyncStatus('saving');
+  try{
+    const resp=await fetch(`${SB_URL}/rest/v1/shows`,{
+      method:'POST',
+      headers:SB_HEADERS,
+      body:JSON.stringify({id:SB_ROW_ID,data:shows,updated_at:new Date().toISOString()})
+    });
+    if(!resp.ok){const err=await resp.text();throw new Error(err);}
+    setSyncStatus('saved');
+  }catch(e){
+    console.warn('Supabase save failed:',e);
+    setSyncStatus('error','Saved locally — check connection');
+  }
+}
+
+function hideLoadingOverlay(){
+  const ov=document.getElementById('loadingOverlay');
+  if(ov){ov.style.opacity='0';ov.style.transition='opacity .4s';setTimeout(()=>ov.remove(),400);}
+}
+function setLoadingMsg(msg){
+  const el=document.getElementById('loadingMsg');if(el)el.textContent=msg;
+}
+async function migrateLocalToCloud(){
+  try{
+    const d=localStorage.getItem('cv_ts_v6');
+    if(!d){dismissMigrate();return;}
+    shows=JSON.parse(d);
+    setLoadingMsg('Uploading your data to cloud…');
+    document.getElementById('migrateBtn').style.display='none';
+    await saveData();
+    hideLoadingOverlay();
+    renderGrid();initResponsive();
+  }catch(e){dismissMigrate();}
+}
+function dismissMigrate(){
+  document.getElementById('migrateBtn').style.display='none';
+  seed();
+  saveData().then(()=>{hideLoadingOverlay();renderGrid();initResponsive();});
+}
+
+async function loadFromSupabase(){
+  setLoadingMsg('Connecting to cloud…');
+  try{
+    const resp=await fetch(`${SB_URL}/rest/v1/shows?id=eq.${SB_ROW_ID}&select=data,updated_at`,{
+      headers:{'apikey':SB_KEY,'Authorization':'Bearer '+SB_KEY,'Accept':'application/json'}
+    });
+    if(!resp.ok)throw new Error(await resp.text());
+    const rows=await resp.json();
+    if(rows&&rows.length&&rows[0].data&&rows[0].data.length){
+      setLoadingMsg('Loading your shows…');
+      return rows[0].data;
+    }
+    return null;
+  }catch(e){
+    console.warn('Supabase load failed:',e);
+    setSyncStatus('error','Cloud unavailable');
+    return null;
+  }
 }
 function toggleSidebar(){
   const sb=document.getElementById('mainSidebar');
@@ -628,62 +735,42 @@ function initResponsive(){
   }
 }
 window.addEventListener('resize',initResponsive);
-function loadData(){
-  try{
-    const d=localStorage.getItem('cv_ts_v6');
-    if(d){
-      shows=JSON.parse(d);
-      // Migration: ensure every show has a links array
-      shows.forEach(s=>{
-        if(!s.links)s.links=[];
-        // Strip old URL text patterns from notes for IMX
-        if(s.name&&s.name.includes('IMX')&&s.notes&&s.notes.includes('inlandmarineexpo')){
-          if(!s.links.find(l=>l.url&&l.url.includes('inlandmarine')))
-            s.links.unshift({label:'Show Website',url:'https://inlandmarineexpo.com',icon:'ti-world'});
-          if(!s.links.find(l=>l.url&&l.url.includes('boomerecommerce')))
-            s.links.push({label:'Exhibitor Portal',url:'https://heritageexpo.boomerecommerce.com',icon:'ti-building-store'});
-          if(!s.links.find(l=>l.note&&l.note.includes('IMX')))
-            s.links.push({label:'1Password',url:'',icon:'ti-lock',note:'IMX - 2026'});
-          s.notes=s.notes.replace(/Show website:.*?(?=\.|$)/i,'').replace(/Exhibitor portal:.*?(?=\.|$)/i,'').replace(/1Password:.*?(?=\.|$)/i,'').replace(/·/g,'').trim();
-        }
-        if(s.name&&s.name.includes('RSI')&&s.notes&&s.notes.includes('fernoneview')){
-          if(!s.links.find(l=>l.url&&l.url.includes('fernoneview')))
-            s.links.push({label:'Exhibitor Portal',url:'https://fernoneview.com',icon:'ti-building-store'});
-          if(!s.links.find(l=>l.note&&l.note.includes('Fernoneview')))
-            s.links.push({label:'1Password',url:'',icon:'ti-lock',note:'Fernoneview'});
-          if(!s.links.find(l=>l.url&&l.url.includes('rainprotection')))
-            s.links.push({label:'COI Contact',url:'mailto:sales@rainprotection.net',icon:'ti-mail'});
-          s.notes='NOT ATTENDING 2026. Archived from 2025. 10x10 BRS-only exhibit.';
-        }
-      });
-      shows.forEach(s=>{
-        if(!s.lodging||typeof s.lodging!=='object')s.lodging={hotel:'',venue:'',keycode:'',checkin:'',checkout:'',wifi:'',lnotes:''};
-        else{['keycode','checkin','checkout','wifi','lnotes'].forEach(f=>{if(s.lodging[f]===undefined)s.lodging[f]='';});}
-        if(!s.postshow)s.postshow={tasks:dc(DEFAULT_POST_SHOW),roi:{leads:0,calls:0,pipeline:'',rating:'',notes:''}};
-        if(!s.postshow.tasks)s.postshow.tasks=dc(DEFAULT_POST_SHOW);
-        if(!s.postshow.roi)s.postshow.roi={leads:0,calls:0,pipeline:'',rating:'',notes:''};
-        if(!s.receipts)s.receipts=[];
-        if(!s.logistics)s.logistics={travelers:[],notes:{plan:'',rentalInfo:'',parkingInfo:'',departureInfo:'',otherNotes:''}};
-        if(!s.logistics.travelers)s.logistics.travelers=[];
-        if(!s.logistics.notes)s.logistics.notes={plan:'',rentalInfo:'',parkingInfo:'',departureInfo:'',otherNotes:''};
-      });
-      shows.forEach(s=>{
-        if(s.name&&s.name.toUpperCase().includes('IMX')){
-          if(s.checklist&&s.checklist['Post-Show']){
-            delete s.checklist['Post-Show'];
-          }
-          // Mark all remaining IMX checklist items complete
-          if(s.checklist){
-            Object.values(s.checklist).forEach(sec=>{
-              sec.forEach(item=>{item.done=true;item.status='complete';});
-            });
-          }
-        }
-      });
-      saveData();
-    }else{seed();}
+async function loadData(){
+  setSyncStatus('loading','Connecting to cloud…');
+  const cloudData=await loadFromSupabase();
+  if(cloudData&&cloudData.length){
+    shows=cloudData;
+    // Run migrations
+    shows.forEach(s=>{
+      if(!s.links)s.links=[];
+      if(!s.lodging||typeof s.lodging!=='object')s.lodging={hotel:'',venue:'',keycode:'',checkin:'',checkout:'',wifi:'',lnotes:''};
+      else{['keycode','checkin','checkout','wifi','lnotes'].forEach(f=>{if(s.lodging[f]===undefined)s.lodging[f]='';});}
+      if(!s.postshow)s.postshow={tasks:dc(DEFAULT_POST_SHOW),roi:{leads:0,calls:0,pipeline:'',rating:'',notes:''}};
+      if(!s.postshow.tasks)s.postshow.tasks=dc(DEFAULT_POST_SHOW);
+      if(!s.postshow.roi)s.postshow.roi={leads:0,calls:0,pipeline:'',rating:'',notes:''};
+      if(!s.receipts)s.receipts=[];
+      if(!s.logistics)s.logistics={travelers:[],notes:{plan:'',rentalInfo:'',parkingInfo:'',departureInfo:'',otherNotes:''}};
+      if(!s.logistics.travelers)s.logistics.travelers=[];
+      if(!s.logistics.notes)s.logistics.notes={plan:'',rentalInfo:'',parkingInfo:'',departureInfo:'',otherNotes:''};
+    });
+    setSyncStatus('saved','Loaded from cloud');
+    hideLoadingOverlay();
+  }else{
+    // Cloud is empty — check if local data exists to migrate
+    const localRaw=localStorage.getItem('cv_ts_v6');
+    if(localRaw){
+      // Offer to migrate
+      setLoadingMsg('No cloud data found — migrate local data?');
+      document.getElementById('migrateBtn').style.display='block';
+      // Don't hide overlay — wait for user choice
+    }else{
+      // Truly first run — seed with defaults and save to cloud
+      setLoadingMsg('First run — setting up…');
+      seed();
+      await saveData();
+      hideLoadingOverlay();
+    }
   }
-  catch(e){seed()}
 }
 
 const BBQ_CL={
@@ -2037,7 +2124,7 @@ function exportCSV(){
   shows.forEach(s=>{csv+=`"${s.name}","${s.start||''}","${s.end||''}","${s.location||''}","${s.biz}","${s.status}","${getEst(s)}","${getSpent(s)}","${getPct(s)}%"\n`;});
   const blob=new Blob([csv],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='cv_events_'+new Date().toISOString().slice(0,10)+'.csv';a.click();
 }
-loadData();renderGrid();initResponsive();
+loadData().then(()=>{renderGrid();initResponsive();});
 
 </script>
 </body>
